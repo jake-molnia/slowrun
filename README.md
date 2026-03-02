@@ -34,6 +34,7 @@ The limited-compute track caps runs at a single 8xH100 node for at most 1 hour.
 1 | 3.402 | Baseline: 2.7B transformer, Muon, dropout 0.1, weight decay 1.6 | 02/26/26 | \~47 mins | [Script](https://github.com/qlabs-eng/slowrun/blob/0d49316316dc6684049a679e03958c3fb612a8fd/train.py) | [@akshayvegesna](https://x.com/akshayvegesna)
 2 | 3.376 | Add shuffling every epoch | 02/27/26 | \~47 mins | [Script](https://github.com/qlabs-eng/slowrun/blob/106a290604abb6d8c5b0c3cc94c3b0eb6fe87dff/train.py) | [@kvegesna](https://x.com/karvegas_)
 3 | 3.349 | Change value embed tables to projections from x0 | 02/28/26 | \~47 mins | [Script](https://github.com/qlabs-eng/slowrun/blob/b261fba252920582076cf8c77dedf9251fe7f7ed/train.py) | [@ms337](https://x.com/madhavsinghal_)
+3 | 3.335 | Use swiglu activation | 02/28/26 | 52.1 mins | [Script](https://github.com/qlabs-eng/slowrun/blob/22d4a24ec53633c16d643779900ac3e9d10643a3/train.py) | [@akshayvegesna](https://x.com/akshayvegesna)
 
 ### Unlimited Compute 
 
