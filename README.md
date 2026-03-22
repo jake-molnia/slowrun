@@ -60,6 +60,7 @@ The tiny track caps runs at a single 8xH100 node for at most 15 minutes.
 5 | 3.383 | Update warmdown ratio | 03/06/26 | 14.6 mins | [Script](https://github.com/qlabs-eng/slowrun/blob/56559aa8526708c107e1e28eb8fc4a1721bd9c67/tiny/train.py) | [@not-nonymous](https://github.com/not-nonymous)
 6 | 3.374 | Half truncated RoPE, partial key offset, residual lambdas to 1.1 | 03/06/26 | 14.8 mins | [Script](https://github.com/qlabs-eng/slowrun/blob/ed62160275273197c3a996c4469d735a05c5eedb/tiny/train.py) | [@ChinmayK0607](https://x.com/ChinmayKak)
 7 | 3.365 | Add weight decay schedule | 03/15/26 | 14.8 mins | [Script](https://github.com/qlabs-eng/slowrun/blob/42c39127d19bebbb806afd630fa852936da35562/tiny/train.py) | [@shmublu](https://x.com/ShmuelBerman)
+8 | 3.353 | Add EMA parameter averaging | 03/21/26 | 14.9 mins | [Script](https://github.com/qlabs-eng/slowrun/blob/0092945e4bf570fdb90fbdf2f1b311361288ea0b/tiny/train.py) | [@clarkkev](https://github.com/clarkkev)
 
 
 
