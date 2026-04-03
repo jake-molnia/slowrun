@@ -47,6 +47,7 @@ The limited-compute track caps runs at a single 8xH100 node for at most 1 hour.
 11 | 3.252 | EMA of weights, hyperparameter tuning | 03/18/26 | 59.2 mins | [Script](https://github.com/qlabs-eng/slowrun/blob/3fb4428f67e77e3bec53d4eafbb2cfd6f999b684/train.py) | [@ChinmayK0607](https://x.com/ChinmayKak), [@ms337](https://x.com/madhavsinghal_)
 12 | 3.248 | Use weighted average of last 3 epoch checkpoints | 03/23/26 | 58.2 mins | [Script](https://github.com/qlabs-eng/slowrun/blob/20117fb36e62b65e96997268883f0b789a85e75d/train.py) | [@not-nonymous](https://github.com/not-nonymous)
 13 | 3.236 | Add [Stochastic Weight Averaging (SWA)](https://arxiv.org/pdf/1803.05407) | 04/01/26 | 58.9 mins | [Script](https://github.com/qlabs-eng/slowrun/blob/5f39cd82fbe58c5a0ab67af2f60a09e6356b88fe/train.py) | [@shmublu](https://x.com/ShmuelBerman)
+14 | 3.230 | Switch c_proj init from zero to normal | 04/02/26 | 58.6 mins | [Script](https://github.com/qlabs-eng/slowrun/blob/146042209ac9ffeff7809f721b2c95dbc6ef87d9/train.py) | [@ms337](https://x.com/madhavsinghal_)
 
 
 ### Tiny Track (15 minutes)
