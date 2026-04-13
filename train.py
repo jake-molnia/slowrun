@@ -83,10 +83,9 @@ parser.add_argument("--stoch-depth", type=float, default=0.05,
                     help="Stochastic depth max drop rate (linear schedule, 0=off)")
 parser.add_argument("--mtp-weight", type=float, default=0.3,
                     help="Multi-token prediction weight (0=off)")
-# LSLinear
-parser.add_argument("--ls-enabled", type=int, default=0, help="Replace dense layers with LSLinear (0=off, 1=on)")
-parser.add_argument("--ls-num-blocks", type=int, default=16, help="Block-diagonal blocks")
-parser.add_argument("--ls-rank", type=int, default=128, help="Low-rank component rank")
+parser.add_argument("--ls-enabled", type=int, default=0, help="Use LSLinear (0=off, 1=on)")
+parser.add_argument("--ls-num-blocks", type=int, default=16, help="LSLinear blocks")
+parser.add_argument("--ls-rank", type=int, default=128, help="LSLinear rank")
 args = parser.parse_args()
 
 # Resolve output path
@@ -174,10 +173,9 @@ def _load_fa3():
 _fa3 = _load_fa3()
 
 def flash_attn_func(q, k, v, causal=False, window_size=(-1, -1)):
-    """Flash Attention: FA3 on Hopper, SDPA fallback elsewhere. q,k,v: (B, T, H, D)."""
+    """Flash Attention: FA3 on Hopper, SDPA fallback elsewhere."""
     if _fa3 is not None:
         return _fa3.flash_attn_func(q, k, v, causal=causal, window_size=window_size)
-    # SDPA fallback (no window support)
     q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
     return F.scaled_dot_product_attention(q, k, v, is_causal=causal).transpose(1, 2)
 
@@ -212,10 +210,6 @@ def apply_rotary_emb(x, cos, sin):
     return torch.cat([x1 * cos + x2 * sin, x1 * (-sin) + x2 * cos], 3)
 
 
-# =============================================================================
-# LSLinear: Low-rank + Block-diagonal Sparse (replaces nn.Linear)
-# =============================================================================
-
 class LSLinear(nn.Module):
     """y = blockdiag(W)(x) + x @ B^T @ A^T. Sparse weight stored 2D for Muon."""
     def __init__(self, in_features, out_features, num_blocks, rank, bias=False):
@@ -228,7 +222,6 @@ class LSLinear(nn.Module):
         self.A = nn.Parameter(torch.empty(out_features, rank))
         self.B = nn.Parameter(torch.empty(rank, in_features))
         self.register_parameter("bias", nn.Parameter(torch.empty(out_features)) if bias else None)
-
     def forward(self, x):
         shape = x.shape
         x_flat = x.reshape(-1, self.in_features)
@@ -236,8 +229,7 @@ class LSLinear(nn.Module):
         xb = x_flat.reshape(-1, self.num_blocks, self.block_in).transpose(0, 1)
         y = torch.bmm(W, xb.transpose(-1, -2)).transpose(-1, -2).transpose(0, 1).reshape(-1, self.out_features)
         y = y + (x_flat @ self.B.t()) @ self.A.t()
-        if self.bias is not None:
-            y = y + self.bias
+        if self.bias is not None: y = y + self.bias
         return y.reshape(*shape[:-1], self.out_features)
 
 LS_ENABLED = bool(args.ls_enabled)
@@ -247,8 +239,7 @@ LS_RANK = args.ls_rank
 def make_linear(in_f, out_f, bias=False, use_ls=True):
     if LS_ENABLED and use_ls:
         nb = LS_BLOCKS
-        while (in_f % nb != 0 or out_f % nb != 0) and nb > 1:
-            nb -= 1
+        while (in_f % nb != 0 or out_f % nb != 0) and nb > 1: nb -= 1
         return LSLinear(in_f, out_f, nb, LS_RANK, bias=bias)
     return nn.Linear(in_f, out_f, bias=bias)
 
@@ -365,16 +356,15 @@ class GPT(nn.Module):
 
     @torch.no_grad()
     def _init_layer(self, layer, mode, scale):
-        """Init nn.Linear or LSLinear. mode='uniform' or 'normal'."""
         if isinstance(layer, LSLinear):
             W = layer.weight.data.reshape(layer.num_blocks, layer.block_out, layer.block_in)
             for i in range(layer.num_blocks):
-                if mode == 'uniform': torch.nn.init.uniform_(W[i], -scale, scale)
+                if mode == 'u': torch.nn.init.uniform_(W[i], -scale, scale)
                 else: torch.nn.init.normal_(W[i], mean=0.0, std=scale)
-            torch.nn.init.zeros_(layer.A)  # start pure sparse, low-rank grows in
+            torch.nn.init.zeros_(layer.A)
             torch.nn.init.kaiming_uniform_(layer.B, a=math.sqrt(5))
         else:
-            if mode == 'uniform': torch.nn.init.uniform_(layer.weight, -scale, scale)
+            if mode == 'u': torch.nn.init.uniform_(layer.weight, -scale, scale)
             else: torch.nn.init.normal_(layer.weight, mean=0.0, std=scale)
 
     @torch.no_grad()
@@ -388,13 +378,13 @@ class GPT(nn.Module):
             all_blocks.append(self.mtp_block)
             torch.nn.init.uniform_(self.mtp_proj.weight, -s, s)
         for block in all_blocks:
-            self._init_layer(block.attn.c_q, 'uniform', s)
-            self._init_layer(block.attn.c_k, 'uniform', s)
-            self._init_layer(block.attn.c_v, 'uniform', s)
-            self._init_layer(block.attn.c_proj, 'normal', normal_std)
-            self._init_layer(block.mlp.c_gate, 'uniform', s)
-            self._init_layer(block.mlp.c_fc, 'uniform', s)
-            self._init_layer(block.mlp.c_proj, 'normal', normal_std)
+            self._init_layer(block.attn.c_q, 'u', s)
+            self._init_layer(block.attn.c_k, 'u', s)
+            self._init_layer(block.attn.c_v, 'u', s)
+            self._init_layer(block.attn.c_proj, 'n', normal_std)
+            self._init_layer(block.mlp.c_gate, 'u', s)
+            self._init_layer(block.mlp.c_fc, 'u', s)
+            self._init_layer(block.mlp.c_proj, 'n', normal_std)
             if block.attn.ve_gate is not None:
                 torch.nn.init.zeros_(block.attn.ve_gate.weight)
             torch.nn.init.zeros_(block.attn.attn_gate.weight)
@@ -557,17 +547,16 @@ polar_express_coeffs = [
     (2.3465413258596377, -1.7097828382687081, 0.42323551169305323),
 ]
 
+@torch.compile(dynamic=False, fullgraph=True)
 def adamw_step_fused(p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_t, eps_t, wd_t):
-    # PyTorch 2.6 requires all lerp_ args to match dtype exactly
-    # Use manual lerp: a.lerp_(b, w) == a = a + w * (b - a)
     p.mul_(1 - lr_t * wd_t)
-    exp_avg.add_((grad.to(exp_avg.dtype) - exp_avg) * (1 - beta1_t))
-    exp_avg_sq.add_((grad.to(exp_avg_sq.dtype).square() - exp_avg_sq) * (1 - beta2_t))
+    exp_avg.lerp_(grad, 1 - beta1_t)
+    exp_avg_sq.lerp_(grad.square(), 1 - beta2_t)
     bias1 = 1 - beta1_t ** step_t
     bias2 = 1 - beta2_t ** step_t
     p.add_(exp_avg / ((exp_avg_sq / bias2).sqrt() + eps_t), alpha=-(lr_t / bias1))
 
-# @torch.compile removed — dtype issues with PyTorch 2.6 compiled optimizer
+@torch.compile(dynamic=False, fullgraph=True)
 def muon_step_fused(stacked_grads, stacked_params, momentum_buffer, second_momentum_buffer,
                     momentum_t, lr_t, wd_t, beta2_t, ns_steps, red_dim):
     momentum = momentum_t.to(stacked_grads.dtype)
