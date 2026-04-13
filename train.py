@@ -557,8 +557,8 @@ polar_express_coeffs = [
     (2.3465413258596377, -1.7097828382687081, 0.42323551169305323),
 ]
 
-@torch.compile(dynamic=False, fullgraph=True, disable=bool(os.environ.get("NO_COMPILE_OPT", "0") != "0"))
 def adamw_step_fused(p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_t, eps_t, wd_t):
+    # No @torch.compile — mixed bf16/fp32 dtypes break compiled lerp_ in PyTorch 2.6
     grad = grad.to(dtype=exp_avg.dtype)
     p.mul_(1 - lr_t * wd_t)
     exp_avg.lerp_(grad, 1 - beta1_t)
@@ -567,7 +567,7 @@ def adamw_step_fused(p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_
     bias2 = 1 - beta2_t ** step_t
     p.add_(exp_avg / ((exp_avg_sq / bias2).sqrt() + eps_t), alpha=-(lr_t / bias1))
 
-@torch.compile(dynamic=False, fullgraph=True)
+# @torch.compile removed — dtype issues with PyTorch 2.6 compiled optimizer
 def muon_step_fused(stacked_grads, stacked_params, momentum_buffer, second_momentum_buffer,
                     momentum_t, lr_t, wd_t, beta2_t, ns_steps, red_dim):
     momentum = momentum_t.to(stacked_grads.dtype)
