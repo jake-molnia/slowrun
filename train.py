@@ -558,19 +558,14 @@ polar_express_coeffs = [
 ]
 
 def adamw_step_fused(p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_t, eps_t, wd_t):
-    # Ensure all dtypes match (PyTorch 2.6 strict dtype checking in lerp_)
-    dtype = p.dtype
-    grad = grad.to(dtype=dtype)
-    exp_avg_f = exp_avg.to(dtype=dtype)
-    exp_avg_sq_f = exp_avg_sq.to(dtype=dtype)
+    # PyTorch 2.6 requires all lerp_ args to match dtype exactly
+    # Use manual lerp: a.lerp_(b, w) == a = a + w * (b - a)
     p.mul_(1 - lr_t * wd_t)
-    exp_avg_f.lerp_(grad, 1 - beta1_t)
-    exp_avg_sq_f.lerp_(grad.square(), 1 - beta2_t)
-    exp_avg.copy_(exp_avg_f)
-    exp_avg_sq.copy_(exp_avg_sq_f)
+    exp_avg.add_((grad.to(exp_avg.dtype) - exp_avg) * (1 - beta1_t))
+    exp_avg_sq.add_((grad.to(exp_avg_sq.dtype).square() - exp_avg_sq) * (1 - beta2_t))
     bias1 = 1 - beta1_t ** step_t
     bias2 = 1 - beta2_t ** step_t
-    p.add_(exp_avg_f / ((exp_avg_sq_f / bias2).sqrt() + eps_t), alpha=-(lr_t / bias1))
+    p.add_(exp_avg / ((exp_avg_sq / bias2).sqrt() + eps_t), alpha=-(lr_t / bias1))
 
 # @torch.compile removed — dtype issues with PyTorch 2.6 compiled optimizer
 def muon_step_fused(stacked_grads, stacked_params, momentum_buffer, second_momentum_buffer,
