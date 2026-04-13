@@ -80,6 +80,10 @@ parser.add_argument("--stoch-depth", type=float, default=0.05,
                     help="Stochastic depth max drop rate (linear schedule, 0=off)")
 parser.add_argument("--mtp-weight", type=float, default=0.3,
                     help="Multi-token prediction weight (0=off)")
+# LSLinear
+parser.add_argument("--ls-enabled", type=int, default=0, help="Replace dense layers with LSLinear (0=off, 1=on)")
+parser.add_argument("--ls-num-blocks", type=int, default=16, help="Block-diagonal blocks")
+parser.add_argument("--ls-rank", type=int, default=128, help="Low-rank component rank")
 args = parser.parse_args()
 
 # Resolve output path
@@ -132,7 +136,7 @@ def get_dist_info():
 
 def print0(s="", **kwargs):
     if int(os.environ.get('RANK', 0)) == 0:
-        print(s, **kwargs)
+        print(s, flush=True, **kwargs)
 
 class DummyWandb:
     def __init__(self): self.summary = {}
@@ -200,6 +204,47 @@ def apply_rotary_emb(x, cos, sin):
     return torch.cat([x1 * cos + x2 * sin, x1 * (-sin) + x2 * cos], 3)
 
 
+# =============================================================================
+# LSLinear: Low-rank + Block-diagonal Sparse (replaces nn.Linear)
+# =============================================================================
+
+class LSLinear(nn.Module):
+    """y = blockdiag(W)(x) + x @ B^T @ A^T. Sparse weight stored 2D for Muon."""
+    def __init__(self, in_features, out_features, num_blocks, rank, bias=False):
+        super().__init__()
+        assert in_features % num_blocks == 0 and out_features % num_blocks == 0
+        self.in_features, self.out_features = in_features, out_features
+        self.num_blocks, self.rank = num_blocks, rank
+        self.block_in, self.block_out = in_features // num_blocks, out_features // num_blocks
+        self.weight = nn.Parameter(torch.empty(num_blocks * self.block_out, self.block_in))
+        self.A = nn.Parameter(torch.empty(out_features, rank))
+        self.B = nn.Parameter(torch.empty(rank, in_features))
+        self.register_parameter("bias", nn.Parameter(torch.empty(out_features)) if bias else None)
+
+    def forward(self, x):
+        shape = x.shape
+        x_flat = x.reshape(-1, self.in_features)
+        W = self.weight.reshape(self.num_blocks, self.block_out, self.block_in)
+        xb = x_flat.reshape(-1, self.num_blocks, self.block_in).transpose(0, 1)
+        y = torch.bmm(W, xb.transpose(-1, -2)).transpose(-1, -2).transpose(0, 1).reshape(-1, self.out_features)
+        y = y + (x_flat @ self.B.t()) @ self.A.t()
+        if self.bias is not None:
+            y = y + self.bias
+        return y.reshape(*shape[:-1], self.out_features)
+
+LS_ENABLED = bool(args.ls_enabled)
+LS_BLOCKS = args.ls_num_blocks
+LS_RANK = args.ls_rank
+
+def make_linear(in_f, out_f, bias=False, use_ls=True):
+    if LS_ENABLED and use_ls:
+        nb = LS_BLOCKS
+        while (in_f % nb != 0 or out_f % nb != 0) and nb > 1:
+            nb -= 1
+        return LSLinear(in_f, out_f, nb, LS_RANK, bias=bias)
+    return nn.Linear(in_f, out_f, bias=bias)
+
+
 class CausalSelfAttention(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
@@ -208,10 +253,10 @@ class CausalSelfAttention(nn.Module):
         self.n_embd = config.n_embd
         self.head_dim = self.n_embd // self.n_head
         assert self.n_embd % self.n_head == 0
-        self.c_q = nn.Linear(self.n_embd, self.n_head * self.head_dim, bias=False)
-        self.c_k = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
-        self.c_v = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
-        self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        self.c_q = make_linear(self.n_embd, self.n_head * self.head_dim)
+        self.c_k = make_linear(self.n_embd, self.n_kv_head * self.head_dim, use_ls=False)
+        self.c_v = make_linear(self.n_embd, self.n_kv_head * self.head_dim, use_ls=False)
+        self.c_proj = make_linear(self.n_embd, self.n_embd)
         self.resid_dropout = nn.Dropout(config.dropout)
         self.ve_gate_channels = 32
         self.ve_gate = nn.Linear(self.ve_gate_channels, self.n_kv_head, bias=False) if has_ve(layer_idx, config.n_layer) else None
@@ -242,9 +287,9 @@ class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         hidden = 256 * ((8 * config.n_embd // 3 + 255) // 256)
-        self.c_gate = nn.Linear(config.n_embd, hidden, bias=False)
-        self.c_fc = nn.Linear(config.n_embd, hidden, bias=False)
-        self.c_proj = nn.Linear(hidden, config.n_embd, bias=False)
+        self.c_gate = make_linear(config.n_embd, hidden)
+        self.c_fc = make_linear(config.n_embd, hidden)
+        self.c_proj = make_linear(hidden, config.n_embd)
         self.resid_dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
@@ -311,6 +356,20 @@ class GPT(nn.Module):
         print0(f"Dupe layers {start}-{end-1}: {loops} extra replays ({loops+1} total passes)")
 
     @torch.no_grad()
+    def _init_layer(self, layer, mode, scale):
+        """Init nn.Linear or LSLinear. mode='uniform' or 'normal'."""
+        if isinstance(layer, LSLinear):
+            W = layer.weight.data.reshape(layer.num_blocks, layer.block_out, layer.block_in)
+            for i in range(layer.num_blocks):
+                if mode == 'uniform': torch.nn.init.uniform_(W[i], -scale, scale)
+                else: torch.nn.init.normal_(W[i], mean=0.0, std=scale)
+            torch.nn.init.zeros_(layer.A)  # start pure sparse, low-rank grows in
+            torch.nn.init.kaiming_uniform_(layer.B, a=math.sqrt(5))
+        else:
+            if mode == 'uniform': torch.nn.init.uniform_(layer.weight, -scale, scale)
+            else: torch.nn.init.normal_(layer.weight, mean=0.0, std=scale)
+
+    @torch.no_grad()
     def init_weights(self):
         torch.nn.init.normal_(self.transformer.wte.weight, mean=0.0, std=1.0)
         torch.nn.init.normal_(self.lm_head.weight, mean=0.0, std=0.001)
@@ -321,13 +380,13 @@ class GPT(nn.Module):
             all_blocks.append(self.mtp_block)
             torch.nn.init.uniform_(self.mtp_proj.weight, -s, s)
         for block in all_blocks:
-            torch.nn.init.uniform_(block.attn.c_q.weight, -s, s)
-            torch.nn.init.uniform_(block.attn.c_k.weight, -s, s)
-            torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
-            torch.nn.init.normal_(block.attn.c_proj.weight, mean=0.0, std=normal_std)
-            torch.nn.init.uniform_(block.mlp.c_gate.weight, -s, s)
-            torch.nn.init.uniform_(block.mlp.c_fc.weight, -s, s)
-            torch.nn.init.normal_(block.mlp.c_proj.weight, mean=0.0, std=normal_std)
+            self._init_layer(block.attn.c_q, 'uniform', s)
+            self._init_layer(block.attn.c_k, 'uniform', s)
+            self._init_layer(block.attn.c_v, 'uniform', s)
+            self._init_layer(block.attn.c_proj, 'normal', normal_std)
+            self._init_layer(block.mlp.c_gate, 'uniform', s)
+            self._init_layer(block.mlp.c_fc, 'uniform', s)
+            self._init_layer(block.mlp.c_proj, 'normal', normal_std)
             if block.attn.ve_gate is not None:
                 torch.nn.init.zeros_(block.attn.ve_gate.weight)
             torch.nn.init.zeros_(block.attn.attn_gate.weight)
@@ -900,6 +959,9 @@ lm_head_params = sum(p.numel() for p in model.lm_head.parameters())
 other_params = param_counts - transformer_params - ve_params - lm_head_params
 num_flops_per_token = model.estimate_flops()
 print0(f"Parameters: {param_counts:,} (transformer: {transformer_params:,}, value_embeds: {ve_params:,}, lm_head: {lm_head_params:,}, other: {other_params:,})")
+if LS_ENABLED:
+    ls_count = sum(m.weight.numel() + m.A.numel() + m.B.numel() for m in model.modules() if isinstance(m, LSLinear))
+    print0(f"LSLinear: {ls_count:,} params | blocks={LS_BLOCKS}, rank={LS_RANK}")
 print0(f"FLOPs per token: {num_flops_per_token:e}")
 
 # Compile
