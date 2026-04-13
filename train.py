@@ -148,10 +148,13 @@ class DummyWandb:
 
 # =============================================================================
 def load_state_dict_into_model(model, state_dict):
-    """Load a state dict into model, handling dtype conversion."""
+    """Load a state dict into model, handling dtype conversion and shape mismatches."""
     for name, p in model.named_parameters():
         if name in state_dict:
-            p.data.copy_(state_dict[name].to(p.device, dtype=p.dtype))
+            if state_dict[name].shape == p.shape:
+                p.data.copy_(state_dict[name].to(p.device, dtype=p.dtype))
+            else:
+                print0(f"  Warning: shape mismatch for {name}: model={p.shape} ckpt={state_dict[name].shape}, skipping")
 
 # =============================================================================
 # Flash Attention (FA3 on Hopper)
