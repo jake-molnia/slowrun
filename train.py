@@ -25,7 +25,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 from torch import Tensor
-import wandb
+try:
+    import wandb
+except ImportError:
+    wandb = None
 import tiktoken
 
 _script_start = time.time()
@@ -142,6 +145,7 @@ class DummyWandb:
     def __init__(self): self.summary = {}
     def log(self, *a, **kw): pass
     def finish(self): pass
+    def log_code(self, *a, **kw): pass
 
 # =============================================================================
 def load_state_dict_into_model(model, state_dict):
@@ -170,8 +174,12 @@ def _load_fa3():
 _fa3 = _load_fa3()
 
 def flash_attn_func(q, k, v, causal=False, window_size=(-1, -1)):
-    """Flash Attention for training (FA3 only). q,k,v: (B, T, H, D)."""
-    return _fa3.flash_attn_func(q, k, v, causal=causal, window_size=window_size)
+    """Flash Attention: FA3 on Hopper, SDPA fallback elsewhere. q,k,v: (B, T, H, D)."""
+    if _fa3 is not None:
+        return _fa3.flash_attn_func(q, k, v, causal=causal, window_size=window_size)
+    # SDPA fallback (no window support)
+    q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+    return F.scaled_dot_product_attention(q, k, v, is_causal=causal).transpose(1, 2)
 
 flash_attn = SimpleNamespace(flash_attn_func=flash_attn_func)
 
@@ -906,14 +914,14 @@ if device_type == "cuda":
 if _fa3 is not None:
     print0("Using Flash Attention 3 (Hopper GPU detected)")
 else:
-    raise RuntimeError("Flash Attention 3 is required but not available. A Hopper (sm90) GPU is needed.")
+    print0("FA3 not available — using PyTorch SDPA fallback")
 
 # wandb
 run_name = args.run if args.run else time.strftime("%Y%m%d_%H%M%S")
 _wandb_kwargs = {"project": "slowrun", "name": run_name}
 if args.wandb_group:
     _wandb_kwargs["group"] = args.wandb_group
-wandb_run = DummyWandb() if not master_process else wandb.init(**_wandb_kwargs)
+wandb_run = DummyWandb() if (not master_process or wandb is None) else wandb.init(**_wandb_kwargs)
 if master_process:
     wandb_run.log_code(".")
 
