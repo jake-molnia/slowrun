@@ -186,7 +186,7 @@ def flash_attn_func(q, k, v, causal=False, window_size=(-1, -1)):
     if _fa3 is not None:
         return _fa3.flash_attn_func(q, k, v, causal=causal, window_size=window_size)
     if _fa2_func is not None:
-        return _fa2_func(q, k, v, causal=causal, window_size=window_size)
+        return _fa2_func(q.bfloat16(), k.bfloat16(), v.bfloat16(), causal=causal, window_size=window_size).to(q.dtype)
     # Last resort: no window attention support
     q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
     return F.scaled_dot_product_attention(q, k, v, is_causal=causal).transpose(1, 2)
