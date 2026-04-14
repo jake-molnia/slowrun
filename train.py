@@ -175,10 +175,19 @@ def _load_fa3():
 
 _fa3 = _load_fa3()
 
+try:
+    from flash_attn import flash_attn_func as _fa2_func
+    print0("Flash Attention 2 loaded")
+except ImportError:
+    _fa2_func = None
+
 def flash_attn_func(q, k, v, causal=False, window_size=(-1, -1)):
-    """Flash Attention: FA3 on Hopper, SDPA fallback elsewhere."""
+    """Flash Attention: FA3 on Hopper, FA2 if installed, SDPA fallback."""
     if _fa3 is not None:
         return _fa3.flash_attn_func(q, k, v, causal=causal, window_size=window_size)
+    if _fa2_func is not None:
+        return _fa2_func(q, k, v, causal=causal, window_size=window_size)
+    # Last resort: no window attention support
     q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
     return F.scaled_dot_product_attention(q, k, v, is_causal=causal).transpose(1, 2)
 
